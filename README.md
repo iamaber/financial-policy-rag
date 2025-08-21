@@ -2,7 +2,7 @@
 
 A Retrieval-Augmented Generation (RAG) chatbot that answers questions about financial policy documents. The system uses Google's Gemini AI model with vector embeddings to provide accurate, contextual responses with exact page and paragraph citations.
 
-## 🚀 Live Demo
+## Live Demo
 
 Try the chatbot live on Hugging Face Spaces: **[https://huggingface.co/spaces/iamaber/financial-policy-rag](https://huggingface.co/spaces/iamaber/financial-policy-rag)**
 

@@ -102,7 +102,7 @@ The web interface will be available at `http://127.0.0.1:7860`
 For development and experimentation:
 
 ```bash
-uv run jupyter lab notebook/chatbot.ipynb
+uv run --with jupyter jupyter lab
 ```
 
 ## How It Works

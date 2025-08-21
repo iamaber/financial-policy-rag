@@ -1,0 +1,7 @@
+.python-version
+*.pyc
+.ipynb_checkpoints
+*.ipynb
+.vscode/
+.env
+*.env

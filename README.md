@@ -2,6 +2,10 @@
 
 A Retrieval-Augmented Generation (RAG) chatbot that answers questions about financial policy documents. The system uses Google's Gemini AI model with vector embeddings to provide accurate, contextual responses with exact page and paragraph citations.
 
+## 🚀 Live Demo
+
+Try the chatbot live on Hugging Face Spaces: **[https://huggingface.co/spaces/iamaber/financial-policy-rag](https://huggingface.co/spaces/iamaber/financial-policy-rag)**
+
 ## Features
 
 - **Document Processing**: Extracts and chunks PDF content using PyPDF2
@@ -76,7 +80,6 @@ For more installation options, visit: https://docs.astral.sh/uv/getting-started/
    GEMINI_API_KEY=your_gemini_api_key_here
    ```
 
-   Get your API key from: https://makersuite.google.com/app/apikey
 
 5. **Place your PDF document**
    

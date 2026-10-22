@@ -23,7 +23,7 @@ startup.
 - **Lazy, cached index**: the PDF is parsed and embedded on the first question,
   then persisted in `data/chroma_db/` and reused until the source or chunking
   configuration changes.
-- **Gemini answer generation**: `gemini-2.0-flash` writes the answer with
+- **Gemini answer generation**: `gemini-3.8-flash` writes the answer with
   page/paragraph citations when `GEMINI_API_KEY` is configured.
 - **Graceful degradation**: missing key, index failures, and Gemini errors are
   reported in the chat instead of raising at import time.
@@ -108,7 +108,7 @@ uv run --with jupyter jupyter lab
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | unset | Gemini key for answer generation |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Answer-generation model |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | Answer-generation model |
 | `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Local embedding model |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 

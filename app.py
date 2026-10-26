@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 from pathlib import Path
@@ -16,6 +17,7 @@ from pathlib import Path
 import gradio as gr
 import PyPDF2
 from dotenv import load_dotenv
+from google.api_core.exceptions import DeadlineExceeded, ResourceExhausted
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -25,6 +27,8 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai.chat_models import _response_to_result
 
 load_dotenv()
 
@@ -67,6 +71,94 @@ GENERATION_ERROR_MESSAGE = (
     "Check that `GEMINI_API_KEY` is valid and that the Google AI free-tier "
     "quota is available, then try again."
 )
+
+QUOTA_ERROR_MESSAGE = (
+    "**The Gemini free-tier daily quota is exhausted.**\n\n"
+    "This demo runs on Google's free tier, which allows only a small number of "
+    "generation requests per day, and today's requests are used up. {reset}\n\n"
+    "Document search still works, but answers stay unavailable until the quota "
+    "resets or `GEMINI_API_KEY` is replaced with a key that has remaining quota."
+)
+
+TIMEOUT_ERROR_MESSAGE = (
+    "**Gemini did not respond in time.**\n\n"
+    "The request was stopped after {seconds:.0f} seconds so the chat would not "
+    "hang. Please try again."
+)
+
+LLM_TIMEOUT_SECONDS = 30.0
+
+
+def _retry_delay_seconds(exc):
+    for detail in getattr(exc, "details", []):
+        delay = getattr(detail, "retry_delay", None)
+        if delay is not None:
+            seconds = delay.ToSeconds()
+            if seconds:
+                return int(seconds)
+
+    message = str(exc)
+    match = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", message)
+    if match:
+        return int(match.group(1))
+    match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', message)
+    if match:
+        return int(float(match.group(1)))
+    return None
+
+
+def _format_retry_delay(seconds):
+    if seconds >= 3600:
+        return f"about {seconds / 3600:.0f} hours ({seconds} seconds)"
+    if seconds >= 60:
+        return f"about {seconds // 60} minutes ({seconds} seconds)"
+    return f"about {seconds} seconds"
+
+
+def _quota_error_message(exc):
+    seconds = _retry_delay_seconds(exc)
+    if seconds:
+        reset = f"Google reports the quota resets in {_format_retry_delay(seconds)}."
+    else:
+        reset = "Google did not report when the quota resets."
+    return QUOTA_ERROR_MESSAGE.format(reset=reset)
+
+
+def _generation_error_message(exc):
+    """Map a failed Gemini call to a user-facing message without leaking details."""
+    if isinstance(exc, ResourceExhausted):
+        return _quota_error_message(exc)
+    if isinstance(exc, (DeadlineExceeded, TimeoutError)):
+        return TIMEOUT_ERROR_MESSAGE.format(seconds=LLM_TIMEOUT_SECONDS)
+    return GENERATION_ERROR_MESSAGE
+
+
+class _BoundedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
+    """Gemini chat model that makes exactly one request with a hard timeout.
+
+    Upstream ``_generate`` wraps the RPC in a tenacity decorator that retries
+    ResourceExhausted and other Google API errors regardless of the declared
+    ``max_retries`` field, and it leaves the gapic retry/timeout defaults in
+    place (a 600 second deadline). That turns an exhausted daily quota into
+    seconds of retrying per request and a stalled chat reply. This override
+    issues the request once and lets the exception reach the caller.
+    """
+
+    def _generate(
+        self,
+        messages,
+        stop=None,
+        run_manager=None,
+        **kwargs,
+    ):
+        request = self._prepare_request(messages, stop=stop, **kwargs)
+        response = self.client.generate_content(
+            request=request,
+            retry=None,
+            timeout=self.timeout or LLM_TIMEOUT_SECONDS,
+            metadata=self.default_metadata,
+        )
+        return _response_to_result(response)
 
 
 class SentenceTransformerEmbeddings(Embeddings):
@@ -238,12 +330,11 @@ def _get_llm():
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
 
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    return ChatGoogleGenerativeAI(
+    return _BoundedChatGoogleGenerativeAI(
         model=LLM_MODEL,
         temperature=0.2,
         google_api_key=api_key,
+        timeout=LLM_TIMEOUT_SECONDS,
     )
 
 
@@ -295,9 +386,9 @@ def answer_question(message, session_id="default"):
 
     try:
         chain = _get_chat_chain()
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to prepare the document index or chat chain")
-        return f"{INDEX_ERROR_MESSAGE}\n\nDetails: `{type(exc).__name__}: {exc}`"
+        return INDEX_ERROR_MESSAGE
 
     try:
         response = chain.invoke(
@@ -306,7 +397,7 @@ def answer_question(message, session_id="default"):
         )
     except Exception as exc:
         logger.exception("Gemini request failed")
-        return f"{GENERATION_ERROR_MESSAGE}\n\nDetails: `{type(exc).__name__}: {exc}`"
+        return _generation_error_message(exc)
 
     return response["answer"]
 

@@ -1,15 +1,14 @@
 """Gradio RAG demo for the Financial Policy document.
 
 Document search is entirely local (sentence-transformers + Chroma), so the app
-starts without any remote embedding quota. Google Gemini is only used to write
-the final answer, behind the optional GEMINI_API_KEY.
+starts without any remote embedding quota. Groq is only used to write the final
+answer, behind the optional GROQ_API_KEY.
 """
 
 import hashlib
 import json
 import logging
 import os
-import re
 import shutil
 import threading
 from pathlib import Path
@@ -17,7 +16,7 @@ from pathlib import Path
 import gradio as gr
 import PyPDF2
 from dotenv import load_dotenv
-from google.api_core.exceptions import DeadlineExceeded, ResourceExhausted
+from groq import APITimeoutError, RateLimitError
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -27,8 +26,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_google_genai.chat_models import _response_to_result
+from langchain_groq import ChatGroq
 
 load_dotenv()
 
@@ -46,14 +44,14 @@ COLLECTION_NAME = "financial_policy"
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
-LLM_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+LLM_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 300
 
 MISSING_KEY_MESSAGE = (
     "**Answer generation is not configured.**\n\n"
-    "This demo needs a Google Gemini API key to write answers. Add "
-    "`GEMINI_API_KEY` as a Space secret (Settings → Variables and secrets) or "
+    "This demo needs a Groq API key to write answers. Add "
+    "`GROQ_API_KEY` as a Space secret (Settings → Variables and secrets) or "
     "set it in a local `.env` file, then restart the app.\n\n"
     "Document search uses a local embedding model and does not need an API key, "
     "so the UI and the index still work without one."
@@ -67,21 +65,21 @@ INDEX_ERROR_MESSAGE = (
 )
 
 GENERATION_ERROR_MESSAGE = (
-    "**Gemini could not generate an answer.**\n\n"
-    "Check that `GEMINI_API_KEY` is valid and that the Google AI free-tier "
-    "quota is available, then try again."
+    "**Groq could not generate an answer.**\n\n"
+    "Check that `GROQ_API_KEY` is valid and that the Groq free-tier rate limit "
+    "has not been reached, then try again."
 )
 
-QUOTA_ERROR_MESSAGE = (
-    "**The Gemini free-tier daily quota is exhausted.**\n\n"
-    "This demo runs on Google's free tier, which allows only a small number of "
-    "generation requests per day, and today's requests are used up. {reset}\n\n"
-    "Document search still works, but answers stay unavailable until the quota "
-    "resets or `GEMINI_API_KEY` is replaced with a key that has remaining quota."
+RATE_LIMIT_ERROR_MESSAGE = (
+    "**Groq rate limit reached.**\n\n"
+    "This demo runs on Groq's free tier, which limits how many requests and "
+    "tokens it accepts in a period. {retry}\n\n"
+    "Document search still works, but answers stay unavailable until the limit "
+    "resets or `GROQ_API_KEY` is replaced with a key with more capacity."
 )
 
 TIMEOUT_ERROR_MESSAGE = (
-    "**Gemini did not respond in time.**\n\n"
+    "**Groq did not respond in time.**\n\n"
     "The request was stopped after {seconds:.0f} seconds so the chat would not "
     "hang. Please try again."
 )
@@ -89,22 +87,16 @@ TIMEOUT_ERROR_MESSAGE = (
 LLM_TIMEOUT_SECONDS = 30.0
 
 
-def _retry_delay_seconds(exc):
-    for detail in getattr(exc, "details", []):
-        delay = getattr(detail, "retry_delay", None)
-        if delay is not None:
-            seconds = delay.ToSeconds()
-            if seconds:
-                return int(seconds)
-
-    message = str(exc)
-    match = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", message)
-    if match:
-        return int(match.group(1))
-    match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', message)
-    if match:
-        return int(float(match.group(1)))
-    return None
+def _retry_after_seconds(exc):
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    value = headers.get("retry-after")
+    if not value:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _format_retry_delay(seconds):
@@ -115,50 +107,22 @@ def _format_retry_delay(seconds):
     return f"about {seconds} seconds"
 
 
-def _quota_error_message(exc):
-    seconds = _retry_delay_seconds(exc)
+def _rate_limit_error_message(exc):
+    seconds = _retry_after_seconds(exc)
     if seconds:
-        reset = f"Google reports the quota resets in {_format_retry_delay(seconds)}."
+        retry = f"Groq asks you to wait {_format_retry_delay(seconds)} before retrying."
     else:
-        reset = "Google did not report when the quota resets."
-    return QUOTA_ERROR_MESSAGE.format(reset=reset)
+        retry = "Groq did not report how long to wait before retrying."
+    return RATE_LIMIT_ERROR_MESSAGE.format(retry=retry)
 
 
 def _generation_error_message(exc):
-    """Map a failed Gemini call to a user-facing message without leaking details."""
-    if isinstance(exc, ResourceExhausted):
-        return _quota_error_message(exc)
-    if isinstance(exc, (DeadlineExceeded, TimeoutError)):
+    """Map a failed Groq call to a user-facing message without leaking details."""
+    if isinstance(exc, RateLimitError):
+        return _rate_limit_error_message(exc)
+    if isinstance(exc, (APITimeoutError, TimeoutError)):
         return TIMEOUT_ERROR_MESSAGE.format(seconds=LLM_TIMEOUT_SECONDS)
     return GENERATION_ERROR_MESSAGE
-
-
-class _BoundedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
-    """Gemini chat model that makes exactly one request with a hard timeout.
-
-    Upstream ``_generate`` wraps the RPC in a tenacity decorator that retries
-    ResourceExhausted and other Google API errors regardless of the declared
-    ``max_retries`` field, and it leaves the gapic retry/timeout defaults in
-    place (a 600 second deadline). That turns an exhausted daily quota into
-    seconds of retrying per request and a stalled chat reply. This override
-    issues the request once and lets the exception reach the caller.
-    """
-
-    def _generate(
-        self,
-        messages,
-        stop=None,
-        run_manager=None,
-        **kwargs,
-    ):
-        request = self._prepare_request(messages, stop=stop, **kwargs)
-        response = self.client.generate_content(
-            request=request,
-            retry=None,
-            timeout=self.timeout or LLM_TIMEOUT_SECONDS,
-            metadata=self.default_metadata,
-        )
-        return _response_to_result(response)
 
 
 class SentenceTransformerEmbeddings(Embeddings):
@@ -326,15 +290,16 @@ def _load_or_build_vectorstore():
 
 
 def _get_llm():
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set")
+        raise RuntimeError("GROQ_API_KEY is not set")
 
-    return _BoundedChatGoogleGenerativeAI(
+    return ChatGroq(
         model=LLM_MODEL,
         temperature=0.2,
-        google_api_key=api_key,
+        groq_api_key=api_key,
         timeout=LLM_TIMEOUT_SECONDS,
+        max_retries=0,
     )
 
 
@@ -381,7 +346,7 @@ def answer_question(message, session_id="default"):
     if not message or not message.strip():
         return "Please enter a question about the financial policy document."
 
-    if not os.getenv("GEMINI_API_KEY"):
+    if not os.getenv("GROQ_API_KEY"):
         return MISSING_KEY_MESSAGE
 
     try:
@@ -396,7 +361,7 @@ def answer_question(message, session_id="default"):
             {"configurable": {"session_id": session_id}},
         )
     except Exception as exc:
-        logger.exception("Gemini request failed")
+        logger.exception("Groq request failed")
         return _generation_error_message(exc)
 
     return response["answer"]
@@ -408,13 +373,13 @@ def chat_with_bot(message, history, request: gr.Request = None):
 
 
 def _startup_badge():
-    if os.getenv("GEMINI_API_KEY"):
+    if os.getenv("GROQ_API_KEY"):
         return (
-            "✅ `GEMINI_API_KEY` is set. Answers are generated by Gemini; "
+            "✅ `GROQ_API_KEY` is set. Answers are generated by Groq; "
             "document search runs locally."
         )
     return (
-        "⚠️ `GEMINI_API_KEY` is not set. The app loads and the local document "
+        "⚠️ `GROQ_API_KEY` is not set. The app loads and the local document "
         "index works, but answers stay disabled until you add the key as a "
         "Space secret or in a local `.env` file."
     )

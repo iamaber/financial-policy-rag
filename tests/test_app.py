@@ -1,25 +1,10 @@
-import time
-
+import httpx
 import pytest
-from google.api_core.exceptions import DeadlineExceeded, ResourceExhausted
-from google.protobuf import duration_pb2
-from google.rpc import error_details_pb2
+from groq import APITimeoutError, RateLimitError
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableLambda
 
 import app
-
-
-class FakeClient:
-    """Stands in for the google generative service client. No network."""
-
-    def __init__(self, exc):
-        self.exc = exc
-        self.calls = []
-
-    def generate_content(self, **kwargs):
-        self.calls.append(kwargs)
-        raise self.exc
 
 
 class FakeVectorStore:
@@ -30,37 +15,31 @@ class FakeVectorStore:
         return RunnableLambda(lambda _query: list(self.documents))
 
 
-def _install_fake_gemini(monkeypatch, exc):
-    """Wire the real chain to a real bounded model with a fake RPC client."""
-    model = app._BoundedChatGoogleGenerativeAI(
-        model="gemini-3.8-flash",
-        temperature=0.2,
-        google_api_key="test-key",
-        timeout=app.LLM_TIMEOUT_SECONDS,
+def _install_broken_chain(monkeypatch, exc):
+    class BrokenChain:
+        def invoke(self, *args, **kwargs):
+            raise exc
+
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setattr(app, "_get_chat_chain", lambda: BrokenChain())
+    return BrokenChain()
+
+
+def _rate_limit_exception(retry_after="120"):
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    headers = {} if retry_after is None else {"retry-after": retry_after}
+    response = httpx.Response(
+        429,
+        request=request,
+        headers=headers,
+        json={"error": {"message": "rate limit"}},
     )
-    client = FakeClient(exc)
-    model.client = client
-
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setattr(app, "_get_llm", lambda: model)
-    monkeypatch.setattr(
-        app,
-        "_load_or_build_vectorstore",
-        lambda: FakeVectorStore([Document(page_content="Policy text.")]),
-    )
-    monkeypatch.setattr(app, "_chat_chain", None)
-    return client
+    return RateLimitError("rate limit", response=response, body=None)
 
 
-def _quota_exception(message="429 quota_value: 20", retry_seconds=79160):
-    details = []
-    if retry_seconds is not None:
-        details = [
-            error_details_pb2.RetryInfo(
-                retry_delay=duration_pb2.Duration(seconds=retry_seconds)
-            )
-        ]
-    return ResourceExhausted(message, details=details)
+def _timeout_exception():
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    return APITimeoutError(request=request)
 
 
 def test_build_documents_keeps_page_and_paragraph_metadata():
@@ -102,7 +81,7 @@ def test_extract_text_returns_empty_list_for_missing_file(tmp_path):
 
 
 def test_answer_question_explains_missing_api_key(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     def should_not_build():
         raise AssertionError("the index must not be built without a key")
@@ -111,30 +90,25 @@ def test_answer_question_explains_missing_api_key(monkeypatch):
 
     answer = app.answer_question("What is the policy?")
 
-    assert "GEMINI_API_KEY" in answer
+    assert "GROQ_API_KEY" in answer
     assert "not configured" in answer
 
 
 def test_answer_question_reports_generation_failure(monkeypatch):
-    class BrokenChain:
-        def invoke(self, *args, **kwargs):
-            raise RuntimeError("429 quota exceeded")
-
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setattr(app, "_get_chat_chain", lambda: BrokenChain())
+    _install_broken_chain(monkeypatch, RuntimeError("unexpected provider failure"))
 
     answer = app.answer_question("What is the policy?")
 
     assert answer == app.GENERATION_ERROR_MESSAGE
     assert "RuntimeError" not in answer
-    assert "429 quota exceeded" not in answer
+    assert "unexpected provider failure" not in answer
 
 
 def test_answer_question_reports_index_failure(monkeypatch):
     def broken_chain():
         raise RuntimeError("embedding model download failed")
 
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
     monkeypatch.setattr(app, "_get_chat_chain", broken_chain)
 
     answer = app.answer_question("What is the policy?")
@@ -143,72 +117,62 @@ def test_answer_question_reports_index_failure(monkeypatch):
     assert "embedding model download failed" not in answer
 
 
-def test_answer_question_reports_quota_with_reset_time(monkeypatch):
-    client = _install_fake_gemini(monkeypatch, _quota_exception())
+def test_answer_question_reports_rate_limit_with_wait_time(monkeypatch):
+    _install_broken_chain(monkeypatch, _rate_limit_exception("120"))
 
-    started = time.monotonic()
     answer = app.answer_question("What is the policy?")
-    elapsed = time.monotonic() - started
 
-    assert "free-tier daily quota is exhausted" in answer
-    assert "22 hours" in answer
-    assert "79160 seconds" in answer
-    assert app.GENERATION_ERROR_MESSAGE not in answer
+    assert "Groq rate limit reached" in answer
+    assert "about 2 minutes (120 seconds)" in answer
     assert "test-key" not in answer
     assert "Traceback" not in answer
-    assert len(client.calls) == 1
-    assert elapsed < 5
 
 
-def test_answer_question_reports_quota_without_retry_delay(monkeypatch):
-    _install_fake_gemini(monkeypatch, _quota_exception(retry_seconds=None))
+def test_answer_question_reports_rate_limit_without_wait_time(monkeypatch):
+    _install_broken_chain(monkeypatch, _rate_limit_exception(None))
 
     answer = app.answer_question("What is the policy?")
 
-    assert "free-tier daily quota is exhausted" in answer
-    assert "did not report when the quota resets" in answer
+    assert "Groq rate limit reached" in answer
+    assert "did not report how long to wait" in answer
 
 
-def test_answer_question_reports_timeout_quickly(monkeypatch):
-    client = _install_fake_gemini(monkeypatch, DeadlineExceeded("deadline exceeded"))
+def test_answer_question_reports_timeout(monkeypatch):
+    _install_broken_chain(monkeypatch, _timeout_exception())
 
-    started = time.monotonic()
     answer = app.answer_question("What is the policy?")
-    elapsed = time.monotonic() - started
 
     assert "did not respond in time" in answer
     assert f"{app.LLM_TIMEOUT_SECONDS:.0f} seconds" in answer
     assert "Traceback" not in answer
-    assert len(client.calls) == 1
-    assert elapsed < 5
 
 
-def test_bounded_model_makes_one_attempt_with_timeout(monkeypatch):
-    client = _install_fake_gemini(monkeypatch, _quota_exception())
+def test_llm_is_configured_for_one_attempt_with_timeout(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
 
-    app.answer_question("What is the policy?")
+    llm = app._get_llm()
 
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call["retry"] is None
-    assert call["timeout"] == app.LLM_TIMEOUT_SECONDS
+    assert llm.model_name == app.LLM_MODEL
+    assert llm.max_retries == 0
+    assert llm.request_timeout == app.LLM_TIMEOUT_SECONDS
 
 
 @pytest.mark.parametrize(
-    "message, expected",
+    "retry_after, expected",
     [
-        ("429 retry_delay { seconds: 79160 }", 79160),
-        ('{"retryDelay": "120s"}', 120),
-        ("429 quota exceeded", None),
+        ("120", 120),
+        ("1.5", 1),
+        (None, None),
+        ("not-a-number", None),
     ],
 )
-def test_retry_delay_seconds_parses_known_shapes(message, expected):
-    assert app._retry_delay_seconds(ResourceExhausted(message)) == expected
+def test_retry_after_seconds_parses_known_shapes(retry_after, expected):
+    assert app._retry_after_seconds(_rate_limit_exception(retry_after)) == expected
 
 
 def test_startup_badge_reflects_key_presence(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     assert "not set" in app._startup_badge()
 
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
     assert "is set" in app._startup_badge()

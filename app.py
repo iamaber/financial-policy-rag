@@ -42,7 +42,7 @@ COLLECTION_NAME = "financial_policy"
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
-LLM_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+LLM_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 300
 

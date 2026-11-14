@@ -1,154 +1,138 @@
 # Financial Policy RAG Chatbot
 
-A Retrieval-Augmented Generation (RAG) chatbot that answers questions about financial policy documents. The system uses Google's Gemini AI model with vector embeddings to provide accurate, contextual responses with exact page and paragraph citations.
+A Retrieval-Augmented Generation (RAG) chatbot that answers questions about a
+financial policy PDF and cites the page and paragraph used for each answer.
+
+Document search works entirely offline: the PDF is chunked locally, embedded
+with a small `sentence-transformers` model, and stored in Chroma. Google Gemini
+is used only to write the final answer, behind the optional `GEMINI_API_KEY`.
 
 ## Live Demo
 
-Try the chatbot live on Hugging Face Spaces: **[https://huggingface.co/spaces/iamaber/financial-policy-rag](https://huggingface.co/spaces/iamaber/financial-policy-rag)**
+Try it on Hugging Face Spaces:
+**[https://huggingface.co/spaces/iamaber/financial-policy-rag](https://huggingface.co/spaces/iamaber/financial-policy-rag)**
+
+The Space loads even when the Gemini key is missing or its quota is exhausted.
+In that case the UI shows a clear configuration message instead of crashing at
+startup.
 
 ## Features
 
-- **Document Processing**: Extracts and chunks PDF content using PyPDF2
-- **Vector Search**: Uses ChromaDB with Google Gemini embeddings for semantic search
-- **Conversational AI**: Powered by Google Gemini 2.0 Flash model
-- **Memory**: Maintains conversation history per session
-- **Citations**: Provides exact page and paragraph references
-- **Web UI**: Interactive Gradio interface
-- **Jupyter Notebook**: Development and experimentation environment
+- **Local embeddings**: `sentence-transformers/all-MiniLM-L6-v2` runs on CPU,
+  so indexing does not consume a remote embedding quota.
+- **Lazy, cached index**: the PDF is parsed and embedded on the first question,
+  then persisted in `data/chroma_db/` and reused until the source or chunking
+  configuration changes.
+- **Gemini answer generation**: `gemini-2.0-flash` writes the answer with
+  page/paragraph citations when `GEMINI_API_KEY` is configured.
+- **Graceful degradation**: missing key, index failures, and Gemini errors are
+  reported in the chat instead of raising at import time.
+- **Conversation history**: per-browser sessions via Gradio's session hash.
+- **Web UI**: Gradio interface with example questions.
+
+## How It Works
+
+1. `PyPDF2` extracts text page by page.
+2. `RecursiveCharacterTextSplitter` splits each page into 1000-character chunks
+   with 300 characters of overlap, keeping page and paragraph metadata.
+3. A local `all-MiniLM-L6-v2` model embeds the chunks and Chroma persists them.
+4. A question is embedded with the same local model and the top chunks are
+   retrieved.
+5. Gemini receives the retrieved context and writes an answer with citations.
+
+Nothing is downloaded, embedded, or sent to Google at import/startup. The
+embedding model is downloaded on the first question (about 90 MB) and cached by
+Hugging Face in the container.
 
 ## Project Structure
 
 ```
 .
-├── app.py                    # Main Gradio web application
-├── config/
-│   └── settings.py          # Configuration and environment variables
+├── app.py                    # Gradio app and lazy RAG pipeline
 ├── data/
 │   ├── For Task - Policy file.pdf  # Source document
-│   └── chroma_db/           # Vector database storage
+│   └── chroma_db/            # Generated index (gitignored)
 ├── notebook/
-│   └── chatbot.ipynb        # Development notebook
-├── .env                     # Environment variables (create from .env.example)
-├── .env.example             # Environment variables template
-├── pyproject.toml           # Project dependencies
-└── README.md                # This file
+│   └── chatbot.ipynb         # Development notebook
+├── tests/
+│   └── test_app.py           # Chunking and degradation tests
+├── .env.example              # Environment variables template
+├── pyproject.toml            # Pinned dependencies
+├── uv.lock
+└── README.md
 ```
-
-## Prerequisites
-
-### Install uv (Python Package Manager)
-
-```bash
-# On macOS and Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# On Windows
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# Alternative: Install via pip
-pip install uv
-```
-
-For more installation options, visit: https://docs.astral.sh/uv/getting-started/installation/
 
 ## Setup
 
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd financial-policy-rag
-   ```
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 
-2. **Create and activate virtual environment**
-   ```bash
-   uv venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
+```bash
+git clone <repository-url>
+cd financial-policy-rag
+uv sync
+cp .env.example .env
+```
 
-3. **Install dependencies**
-   ```bash
-   uv sync
-   ```
+Add your key to `.env`:
 
-4. **Set up environment variables**
-   ```bash
-   cp .env.example .env
-   ```
-   
-   Edit `.env` and add your Google AI API key:
-   ```
-   GEMINI_API_KEY=your_gemini_api_key_here
-   ```
+```
+GEMINI_API_KEY=your_gemini_api_key_here
+```
 
-
-5. **Place your PDF document**
-   
-   Put your financial policy PDF file at: `data/For Task - Policy file.pdf`
+The key is required only for answer generation. Without it you can still start
+the app and inspect the UI, but chat replies explain that the key is missing.
 
 ## Usage
-
-### Web Application
-
-Run the Gradio web interface:
 
 ```bash
 uv run python app.py
 ```
 
-The web interface will be available at `http://127.0.0.1:7860`
+Open `http://127.0.0.1:7860`. The first question builds the index; later
+questions reuse `data/chroma_db/`.
 
-### Jupyter Notebook
+### Tests
 
-For development and experimentation:
+```bash
+uv run pytest
+```
+
+### Notebook
 
 ```bash
 uv run --with jupyter jupyter lab
 ```
 
-## How It Works
-
-1. **Document Processing**: PDF content is extracted using PyPDF2 and split into semantic chunks
-2. **Embedding**: Text chunks are converted to vector embeddings using Google's embedding model
-3. **Storage**: Embeddings are stored in ChromaDB for fast similarity search
-4. **Retrieval**: User queries are embedded and matched against stored document chunks
-5. **Generation**: Retrieved context is sent to Gemini 2.0 Flash to generate accurate answers
-6. **Citations**: Responses include exact page and paragraph references from the source document
-
-## Technical Details
-
-- **LLM**: Google Gemini 2.0 Flash (temperature=0.2 for consistency)
-- **Embeddings**: Google `models/embedding-001`
-- **Vector Store**: ChromaDB with persistent storage
-- **Text Splitting**: RecursiveCharacterTextSplitter (1000 chars, 200 overlap)
-- **Framework**: LangChain for RAG pipeline
-- **UI**: Gradio for web interface
-
 ## Configuration
 
-Key settings in [`config/settings.py`](config/settings.py):
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | unset | Gemini key for answer generation |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Answer-generation model |
+| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Local embedding model |
+| `LOG_LEVEL` | `INFO` | Python logging level |
 
-- `GEMINI_API_KEY`: Your Google AI API key
-- Embedding model: `models/embedding-001`
-- LLM model: `gemini-2.0-flash`
-- Vector DB: `data/chroma_db/`
+## Deployment
 
-## Dependencies
+The GitHub repository uses `pyproject.toml` + `uv.lock`. The Hugging Face Space
+uses the same `app.py` with a `requirements.txt` that pins the runtime and
+installs CPU-only PyTorch. The Space README is a Space card (YAML front matter);
+this README is the GitHub version.
 
-Main dependencies (see [`pyproject.toml`](pyproject.toml) for complete list):
+On the Space, add `GEMINI_API_KEY` under **Settings → Variables and secrets**.
 
-- `langchain` - RAG framework
-- `langchain-google-genai` - Google AI integration
-- `langchain-chroma` - ChromaDB integration
-- `gradio` - Web UI
-- `PyPDF2` - PDF processing
-- `python-dotenv` - Environment variables
+## Limitations
 
-## Development
-
-The [`notebook/chatbot.ipynb`](notebook/chatbot.ipynb) contains the complete development workflow:
-
-1. PDF text extraction
-2. Document chunking and preprocessing
-3. Vector store creation
-4. RAG chain setup
-5. Interactive testing
+- The demo answers questions about one bundled PDF only; it is not a general
+  financial-policy assistant.
+- `all-MiniLM-L6-v2` is small and fast, but retrieval quality is lower than a
+  hosted embedding model.
+- The first question is slower because it downloads and loads the embedding
+  model and builds the index.
+- Gemini free-tier quotas can still limit answer generation. Retrieval keeps
+  working locally, but answers are unavailable until the quota resets or a
+  billed key is used.
+- Citations are generated by the language model from page/paragraph metadata.
+  Verify important facts against the source document.
+- Conversation history is in memory and is lost when the Space restarts.
+- This is a demonstration, not financial or legal advice.

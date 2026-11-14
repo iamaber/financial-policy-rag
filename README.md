@@ -136,3 +136,14 @@ On the Space, add `GEMINI_API_KEY` under **Settings → Variables and secrets**.
   Verify important facts against the source document.
 - Conversation history is in memory and is lost when the Space restarts.
 - This is a demonstration, not financial or legal advice.
+
+## License
+
+The application code is released under the MIT License; see [LICENSE](LICENSE).
+
+The bundled `data/For Task - Policy file.pdf` contains the **Financial Policy
+Objectives and Strategies Statement**, from the Australian Capital Territory
+**2005-06 Budget Paper No. 3** (printed pages 3–10). No copyright, licence,
+redistribution permission, or separate terms were found in its extracted text.
+The MIT licence covers the application code and does not relicense this
+third-party policy document; its reuse terms have not been verified.

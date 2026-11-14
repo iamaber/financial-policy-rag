@@ -1,18 +1,24 @@
 [project]
 name = "financial-policy-rag"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "RAG chatbot that answers questions about a financial policy PDF with citations"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "chromadb>=1.0.20",
-    "gradio>=5.43.1",
-    "langchain>=0.3.27",
-    "langchain-chroma>=0.2.5",
-    "langchain-community>=0.3.27",
-    "langchain-core>=0.3.74",
-    "langchain-google-genai>=2.0.10",
-    "pdfplumber>=0.11.7",
-    "pypdf2>=3.0.1",
-    "python-dotenv>=1.1.1",
+    "chromadb==1.0.20",
+    "gradio==5.43.1",
+    "langchain==0.3.27",
+    "langchain-chroma==0.2.5",
+    "langchain-core==0.3.74",
+    "langchain-google-genai==2.0.10",
+    "pypdf2==3.0.1",
+    "python-dotenv==1.1.1",
+    "sentence-transformers==5.6.0",
 ]
+
+[dependency-groups]
+dev = ["pytest==8.4.2"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

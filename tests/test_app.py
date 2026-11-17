@@ -166,7 +166,6 @@ def test_llm_sends_configured_reasoning_effort_or_omits_it(monkeypatch, effort):
 
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     monkeypatch.setattr(dotenv, "load_dotenv", lambda: None)
-    # Preserve module configuration after reloading it with controlled env values.
     monkeypatch.setattr(app, "LLM_MODEL", app.LLM_MODEL)
     monkeypatch.setattr(app, "GROQ_REASONING_EFFORT", app.GROQ_REASONING_EFFORT)
     if effort is None:

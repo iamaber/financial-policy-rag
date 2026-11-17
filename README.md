@@ -23,7 +23,7 @@ startup.
 - **Lazy, cached index**: the PDF is parsed and embedded on the first question,
   then persisted in `data/chroma_db/` and reused until the source or chunking
   configuration changes.
-- **Groq answer generation**: `llama-3.1-8b-instant` writes the answer with
+- **Groq answer generation**: `qwen/qwen3.8-27b` writes the answer with
   page/paragraph citations when `GROQ_API_KEY` is configured.
 - **Graceful degradation**: missing key, index failures, and Groq errors are
   reported in the chat instead of raising at import time.
@@ -108,9 +108,15 @@ uv run --with jupyter jupyter lab
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `GROQ_API_KEY` | unset | Groq key for answer generation |
-| `GROQ_MODEL` | `llama-3.1-8b-instant` | Answer-generation model |
+| `GROQ_MODEL` | `qwen/qwen3.8-27b` | Answer-generation model |
+| `GROQ_REASONING_EFFORT` | `none` | Instruct mode; set to an empty string to omit the parameter for models without reasoning support |
 | `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Local embedding model |
 | `LOG_LEVEL` | `INFO` | Python logging level |
+
+Instruct mode avoids thinking tokens and their latency for short RAG answers. The
+grounded-answer temperature stays at 0.2. The pinned `langchain-groq==0.3.8` supports
+the `reasoning_effort` field directly; the app omits it when the env value is empty
+instead of sending the library's default `null`.
 
 ## Deployment
 

@@ -1,3 +1,6 @@
+import importlib
+from types import SimpleNamespace
+
 import httpx
 import pytest
 from groq import APITimeoutError, RateLimitError
@@ -155,6 +158,52 @@ def test_llm_is_configured_for_one_attempt_with_timeout(monkeypatch):
     assert llm.model_name == app.LLM_MODEL
     assert llm.max_retries == 0
     assert llm.request_timeout == app.LLM_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("effort", [None, "low", ""])
+def test_llm_sends_configured_reasoning_effort_or_omits_it(monkeypatch, effort):
+    import dotenv
+
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda: None)
+    # Preserve module configuration after reloading it with controlled env values.
+    monkeypatch.setattr(app, "LLM_MODEL", app.LLM_MODEL)
+    monkeypatch.setattr(app, "GROQ_REASONING_EFFORT", app.GROQ_REASONING_EFFORT)
+    if effort is None:
+        monkeypatch.delenv("GROQ_REASONING_EFFORT", raising=False)
+        monkeypatch.delenv("GROQ_MODEL", raising=False)
+        expected_model = "qwen/qwen3.8-27b"
+    else:
+        monkeypatch.setenv("GROQ_REASONING_EFFORT", effort)
+        monkeypatch.setenv("GROQ_MODEL", "alternate-model")
+        expected_model = "alternate-model"
+    importlib.reload(app)
+    llm = app._get_llm()
+    calls = []
+
+    def fake_create(**kwargs):
+        calls.append(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "Cited answer"},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(llm, "client", SimpleNamespace(create=fake_create))
+    assert llm.invoke("What is the policy?").content == "Cited answer"
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["model"] == expected_model
+    assert call["temperature"] == 0.2
+    assert llm.model_kwargs == {}
+    if effort == "":
+        assert "reasoning_effort" not in call
+    else:
+        assert call["reasoning_effort"] == (effort or "none")
 
 
 @pytest.mark.parametrize(

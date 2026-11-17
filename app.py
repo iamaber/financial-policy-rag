@@ -44,7 +44,8 @@ COLLECTION_NAME = "financial_policy"
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
-LLM_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+LLM_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+GROQ_REASONING_EFFORT = os.getenv("GROQ_REASONING_EFFORT", "none")
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 300
 
@@ -289,13 +290,25 @@ def _load_or_build_vectorstore():
         return _vectorstore
 
 
+class OptionalReasoningChatGroq(ChatGroq):
+    """Omit unset reasoning effort; langchain-groq 0.3.8 otherwise sends null."""
+
+    @property
+    def _default_params(self):
+        params = super()._default_params
+        if self.reasoning_effort is None:
+            params.pop("reasoning_effort", None)
+        return params
+
+
 def _get_llm():
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is not set")
 
-    return ChatGroq(
+    return OptionalReasoningChatGroq(
         model=LLM_MODEL,
+        reasoning_effort=GROQ_REASONING_EFFORT or None,
         temperature=0.2,
         groq_api_key=api_key,
         timeout=LLM_TIMEOUT_SECONDS,
